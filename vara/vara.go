@@ -14,10 +14,6 @@ import (
 	"github.com/la5nta/wl2k-go/transport"
 )
 
-const network = "vara"
-
-var errNotImplemented = errors.New("not implemented")
-
 // ModemConfig defines configuration options for connecting with the VARA modem program.
 type ModemConfig struct {
 	// Host on the network which is hosting VARA; defaults to `localhost`
@@ -82,21 +78,54 @@ func NewModem(scheme string, myCall string, config ModemConfig) (*Modem, error) 
 	}, nil
 }
 
-// Start establishes TCP connections with the VARA modem program. This must be called before
-// sending commands to the modem.
+// Start establishes TCP connections with the VARA modem program and initializes configuration. This
+// must be called before sending commands to the modem.
 func (m *Modem) start() error {
-	// Open command port TCP connection
 	var err error
-	m.cmdConn, err = m.connectTCP("command", m.config.CmdPort)
-	if err != nil {
-		return err
+
+	// Open the VARA command TCP port if it isn't
+	if m.cmdConn == nil {
+		m.cmdConn, err = m.connectTCP("command", m.config.CmdPort)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Start listening for incoming VARA commands
+	go m.cmdListen()
+
+	// Open the VARA data TCP port if it isn't
+	if m.dataConn == nil {
+		var err error
+		if m.dataConn, err = m.connectTCP("data", m.config.DataPort); err != nil {
+			return err
+		}
 	}
 
 	// channel is not busy until Vara tells otherwise
 	m.busy = false
 
-	// Start listening for incoming VARA commands
-	go m.cmdListen()
+	// Select public
+	if err := m.writeCmd(fmt.Sprintf("PUBLIC ON")); err != nil {
+		return err
+	}
+
+	// CWID enable
+	if m.scheme == "varahf" {
+		if err := m.writeCmd(fmt.Sprintf("CWID ON")); err != nil {
+			return err
+		}
+	}
+
+	// Set compression
+	if err := m.writeCmd(fmt.Sprintf("COMPRESSION TEXT")); err != nil {
+		return err
+	}
+
+	// Set MYCALL
+	if err := m.writeCmd(fmt.Sprintf("MYCALL %s", m.myCall)); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -119,7 +148,7 @@ func (m *Modem) Close() error {
 					return err
 				}
 			}
-		case <-time.After(time.Second * 60):
+		case <-time.After(time.Second * 10):
 			if err := m.writeCmd("ABORT"); err != nil {
 				return err
 			}
@@ -127,18 +156,15 @@ func (m *Modem) Close() error {
 	}
 
 	// Make sure to stop TX (should have already happened, but this is a backup)
-	if m.rig != nil {
-		_ = m.rig.SetPTT(false)
-	}
+	m.sendPTT(false)
 
 	// Clear up internal state
-	m.toCall = ""
-	m.busy = false
+	m.handleDisconnect()
 	return nil
 }
 
 func (m *Modem) connectTCP(name string, port int) (*net.TCPConn, error) {
-	debugPrint(fmt.Sprintf("Connecting %s", name))
+	debugPrint(fmt.Sprintf("Connecting %s TCP port", name))
 	cmdAddr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf("%s:%d", m.config.Host, port))
 	if err != nil {
 		return nil, fmt.Errorf("couldn't resolve VARA %s address: %w", name, err)
@@ -155,7 +181,7 @@ func disconnectTCP(name string, port *net.TCPConn) *net.TCPConn {
 		return nil
 	}
 	_ = port.Close()
-	debugPrint(fmt.Sprintf("disonnected %s", name))
+	debugPrint(fmt.Sprintf("disconnected %s TCP port", name))
 	return nil
 }
 
@@ -176,11 +202,15 @@ func (m *Modem) cmdListen() {
 		}
 		l, err := m.cmdConn.Read(buf)
 		if err != nil {
-			debugPrint(fmt.Sprintf("cmdListen err: %v", err))
 			if errors.Is(err, io.EOF) {
 				// VARA program killed?
 				return
 			}
+			if errors.Is(err, net.ErrClosed) {
+				// Connection closed
+				return
+			}
+			debugPrint(fmt.Sprintf("cmdListen err: %v", err))
 			continue
 		}
 		cmds := strings.Split(string(buf[:l]), "\r")
@@ -258,7 +288,10 @@ func (m *Modem) handleDisconnect() {
 	// Close data port TCP connection
 	m.dataConn = disconnectTCP("data", m.dataConn)
 	// Close command port TCP connection
-	m.cmdConn = disconnectTCP("cmd", m.cmdConn)
+	m.cmdConn = disconnectTCP("command", m.cmdConn)
+
+	m.toCall = ""
+	m.busy = false
 }
 
 func (m *Modem) Ping() bool {

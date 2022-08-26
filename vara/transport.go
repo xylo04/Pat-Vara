@@ -15,50 +15,13 @@ func (m *Modem) DialURL(url *transport.URL) (net.Conn, error) {
 		return nil, transport.ErrUnsupportedScheme
 	}
 
-	// Open the VARA command TCP port if it isn't
-	if m.cmdConn == nil {
-		if err := m.start(); err != nil {
-			return nil, err
-		}
-	}
-
-	// Open the VARA data TCP port if it isn't
-	if m.dataConn == nil {
-		var err error
-		if m.dataConn, err = m.connectTCP("data", m.config.DataPort); err != nil {
-			return nil, err
-		}
-	}
-
-	// Select public
-	if err := m.writeCmd(fmt.Sprintf("PUBLIC ON")); err != nil {
-		return nil, err
-	}
-
-	// CWID enable
-	if m.scheme == "varahf" {
-		if err := m.writeCmd(fmt.Sprintf("CWID ON")); err != nil {
-			return nil, err
-		}
-	}
-
-	// Set compression
-	if err := m.writeCmd(fmt.Sprintf("COMPRESSION TEXT")); err != nil {
-		return nil, err
-	}
-
-	// Set MYCALL
-	if err := m.writeCmd(fmt.Sprintf("MYCALL %s", m.myCall)); err != nil {
+	err := m.start()
+	if err != nil {
 		return nil, err
 	}
 
 	// Set bandwidth from the URL
 	if err := m.setBandwidth(url); err != nil {
-		return nil, err
-	}
-
-	// Listen on
-	if err := m.writeCmd(fmt.Sprintf("LISTEN ON")); err != nil {
 		return nil, err
 	}
 
